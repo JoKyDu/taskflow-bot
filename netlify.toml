@@ -1,0 +1,13 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+
+[[plugins]]
+  package = "@netlify/plugin-functions-install-core"
+
+[functions]
+  node_bundler = "esbuild"
+
+# Daily reminder at 7:00 AM EST = 12:00 UTC
+[functions."daily-reminder"]
+  schedule = "0 12 * * *"
