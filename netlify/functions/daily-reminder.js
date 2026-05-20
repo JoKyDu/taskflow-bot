@@ -1,145 +1,148 @@
 // netlify/functions/daily-reminder.js
 // Runs every day at 7AM EST (12:00 UTC)
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const TELEGRAM_BOT_TOKEN  = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID    = process.env.TELEGRAM_CHAT_ID;
+const GOOGLE_CLIENT_ID    = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
 
+// ── Get Google Access Token ────────────────────────────────────────────────────
+async function getAccessToken() {
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id:     GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      refresh_token: GOOGLE_REFRESH_TOKEN,
+      grant_type:    'refresh_token',
+    }),
+  });
+  const data = await res.json();
+  return data.access_token;
+}
+
+// ── Get Google Tasks ───────────────────────────────────────────────────────────
+async function getGoogleTasks(accessToken) {
+  // Get all task lists
+  const listsRes = await fetch('https://tasks.googleapis.com/tasks/v1/users/@me/lists', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const listsData = await listsRes.json();
+  const lists = listsData.items || [];
+
+  let allTasks = [];
+  for (const list of lists) {
+    const tasksRes = await fetch(
+      `https://tasks.googleapis.com/tasks/v1/lists/${list.id}/tasks?showCompleted=false`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const tasksData = await tasksRes.json();
+    const tasks = (tasksData.items || []).map(t => ({
+      ...t,
+      listName: list.title,
+    }));
+    allTasks = allTasks.concat(tasks);
+  }
+  return allTasks;
+}
+
+// ── Get Google Calendar Events for Today ──────────────────────────────────────
+async function getCalendarEvents(accessToken) {
+  const now = new Date();
+  const estOffset = -5 * 60; // EST = UTC-5
+  const estNow = new Date(now.getTime() + (estOffset + now.getTimezoneOffset()) * 60000);
+  
+  const startOfDay = new Date(estNow);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(estNow);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?` +
+    `timeMin=${startOfDay.toISOString()}&timeMax=${endOfDay.toISOString()}&singleEvents=true&orderBy=startTime`;
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const data = await res.json();
+  return data.items || [];
+}
+
+// ── Send Telegram Message ──────────────────────────────────────────────────────
 async function sendTelegram(message) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: TELEGRAM_CHAT_ID,
       text: message,
-      parse_mode: "HTML",
+      parse_mode: 'HTML',
     }),
   });
   return res.json();
 }
 
-async function getTasks() {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/tasks?select=*&order=priority.asc`,
-    {
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      },
-    }
-  );
-  return res.json();
-}
-
-function getPriorityEmoji(priority) {
-  const map = { high: "🔴", medium: "🟡", low: "🟢" };
-  return map[priority] || "⚪";
-}
-
-function formatTaskList(tasks, label, emoji) {
-  if (!tasks.length) return "";
-  const lines = tasks
-    .map((t) => `  ${getPriorityEmoji(t.priority)} ${t.title}`)
-    .join("\n");
-  return `\n${emoji} <b>${label}</b>\n${lines}`;
-}
-
-function getTodayDow() {
-  // Returns 0=Sun, 1=Mon, ... 6=Sat in EST
-  const now = new Date(
-    new Date().toLocaleString("en-US", { timeZone: "America/New_York" })
-  );
-  return now.getDay();
-}
-
-function getMonthName() {
-  const now = new Date(
-    new Date().toLocaleString("en-US", { timeZone: "America/New_York" })
-  );
-  return now.toLocaleString("en-US", { month: "long", year: "numeric" });
-}
-
+// ── Helpers ────────────────────────────────────────────────────────────────────
 function getDateString() {
-  const now = new Date(
-    new Date().toLocaleString("en-US", { timeZone: "America/New_York" })
-  );
-  return now.toLocaleDateString("en-US", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  return now.toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   });
 }
 
-const DAY_FULL = [
-  "Sunday",
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-];
+function formatTime(dateTimeStr) {
+  if (!dateTimeStr) return '';
+  const d = new Date(dateTimeStr);
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York' });
+}
 
+// ── Main Handler ───────────────────────────────────────────────────────────────
 exports.handler = async function (event, context) {
   try {
-    const allTasks = await getTasks();
-    const todayDow = getTodayDow();
+    const accessToken = await getAccessToken();
+    const [googleTasks, calendarEvents] = await Promise.all([
+      getGoogleTasks(accessToken),
+      getCalendarEvents(accessToken),
+    ]);
 
-    // Filter daily tasks (not completed today)
-    const dailyTasks = allTasks.filter(
-      (t) => t.freq === "daily" && t.repeat && !t.completed
-    );
-
-    // Filter weekly tasks for today's day of week
-    const weeklyTasks = allTasks.filter((t) => {
-      if (t.freq !== "weekly" || !t.repeat || t.completed) return false;
-      const days = Array.isArray(t.days) ? t.days : JSON.parse(t.days || "[]");
-      return days.includes(todayDow);
-    });
-
-    // Filter monthly tasks (show all non-completed monthly tasks)
-    const monthlyTasks = allTasks.filter(
-      (t) => t.freq === "monthly" && t.repeat && !t.completed
-    );
-
-    // Build message
     const dateStr = getDateString();
-    const greetings = [
-      "Good morning! ☀️",
-      "Good morning! 🌸",
-      "Rise and shine! 🌅",
-    ];
+    const greetings = ['Good morning! ☀️', 'Good morning! 🌸', 'Rise and shine! 🌅'];
     const greeting = greetings[new Date().getDate() % greetings.length];
 
-    let message = `${greeting}\n<b>${dateStr}</b>\n\n`;
-    message += `📋 <b>YOUR TASKS FOR TODAY</b>\n`;
-    message += `━━━━━━━━━━━━━━━━━━━━`;
+    let message = `${greeting}\n<b>${dateStr}</b>\n`;
+    message += `━━━━━━━━━━━━━━━━━━━━\n`;
 
-    const dailySection = formatTaskList(dailyTasks, "DAILY TASKS", "🌤️");
-    const weeklySection = formatTaskList(
-      weeklyTasks,
-      `WEEKLY — ${DAY_FULL[todayDow]}`,
-      "📅"
-    );
-    const monthlySection = formatTaskList(
-      monthlyTasks,
-      `MONTHLY — ${getMonthName()}`,
-      "📆"
-    );
-
-    if (!dailySection && !weeklySection && !monthlySection) {
-      message += "\n\n✅ No pending tasks for today. Enjoy your day! 🎉";
-    } else {
-      message += dailySection + weeklySection + monthlySection;
+    // Google Calendar Events
+    if (calendarEvents.length > 0) {
+      message += `\n📅 <b>TODAY'S SCHEDULE</b>\n`;
+      calendarEvents.forEach(event => {
+        const time = event.start?.dateTime
+          ? formatTime(event.start.dateTime)
+          : 'All day';
+        message += `  🕐 ${time} — ${event.summary}\n`;
+      });
     }
 
-    const totalTasks =
-      dailyTasks.length + weeklyTasks.length + monthlyTasks.length;
-    message += `\n\n━━━━━━━━━━━━━━━━━━━━`;
-    message += `\n📊 <b>${totalTasks} task${totalTasks !== 1 ? "s" : ""}</b> for today. You got this! 💪`;
+    // Google Tasks
+    if (googleTasks.length > 0) {
+      message += `\n✅ <b>YOUR TASKS</b>\n`;
+      googleTasks.forEach(task => {
+        const due = task.due
+          ? ` <i>(due ${new Date(task.due).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})</i>`
+          : '';
+        message += `  📌 ${task.title}${due}\n`;
+        if (task.notes) message += `     <i>${task.notes}</i>\n`;
+      });
+    }
+
+    if (calendarEvents.length === 0 && googleTasks.length === 0) {
+      message += `\n✅ No tasks or events for today. Enjoy your day! 🎉`;
+    }
+
+    message += `\n━━━━━━━━━━━━━━━━━━━━`;
+    message += `\n📊 <b>${googleTasks.length} task${googleTasks.length !== 1 ? 's' : ''}</b> · <b>${calendarEvents.length} event${calendarEvents.length !== 1 ? 's' : ''}</b> today. You got this! 💪`;
 
     const result = await sendTelegram(message);
 
@@ -147,12 +150,13 @@ exports.handler = async function (event, context) {
       statusCode: 200,
       body: JSON.stringify({
         success: true,
-        tasks_sent: totalTasks,
-        telegram_result: result,
+        tasks: googleTasks.length,
+        events: calendarEvents.length,
+        telegram: result,
       }),
     };
   } catch (err) {
-    console.error("Error:", err);
+    console.error('Error:', err);
     return {
       statusCode: 500,
       body: JSON.stringify({ error: err.message }),
